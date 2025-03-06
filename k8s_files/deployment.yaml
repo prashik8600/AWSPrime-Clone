@@ -1,0 +1,23 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: awsprime-app
+  labels:
+    app: awsprime-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: awsprime-app
+  template:
+    metadata:
+      labels:
+        app: awsprime-app
+    spec:
+      containers:
+      - name: awsprime-container
+        image: 438465146284.dkr.ecr.ap-south-1.amazonaws.com/amazon-prime:17
+        ports:
+        - containerPort: 3000
+...

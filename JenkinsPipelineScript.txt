@@ -1,0 +1,268 @@
+##################################### CI pipeline jenkins code #####################################
+
+pipeline {
+    agent any
+    
+    tools {
+        jdk 'JDK17'
+        nodejs 'NodeJS'
+    }
+    
+    parameters {
+        string (name:'AWS_ACCOUNT_ID', defaultValue: 'amazon-prime', description:'Enter your AWS Account ID')
+        string (name:'ECR_REPO_NAME', defaultValue: 'amazon-prime', description:'Enter your ECR Repository')
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'SonarQube Scanner'
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/prashik8600/DevopsProjectPrimeClone.git'
+            }
+        }
+        
+        stage('Sonar Qube Analysis') {
+            steps {
+                withSonarQubeEnv ('sonar-server') {
+                    sh """
+                    $SCANNER_HOME/bin/sonar-scanner \
+                    -Dsonar.projectName=amazon-prime \
+                    -Dsonar.projectKey=amazon-prime
+                    """
+                }
+            }
+        }
+        
+        stage('Sonar Quality Gate') {
+            steps {
+                waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+            }
+        }
+        
+        stage('NPM install') {
+            steps {
+                sh "npm install"
+            }
+        }
+
+        stage('Trivy Scan') {
+            steps {
+                sh """
+                set -e
+                trivy fs . > trivy-scan-result.txt
+                """
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${params.ECR_REPO_NAME} ."
+            }
+        }
+
+        stage('Create ECR Repo') {
+            steps {
+                withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
+                                 string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh """
+                    aws configure set aws_access_key_id $AWS_ACCESS_KEY
+                    aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+                    aws ecr describe-repositories --repository-names ${params.ECR_REPO_NAME} --region ap-south-1 2>/dev/null || \
+                    aws ecr create-repository --repository-name ${params.ECR_REPO_NAME} --region ap-south-1
+                    """
+                
+                }
+            }
+        }
+
+        stage('Login To ECR and Tag Image') {
+            steps {
+                withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
+                                 string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh """
+                    aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ${params.AWS_ACCOUNT_ID}.dkr.ecr.ap-south-1.amazonaws.com
+                    docker tag ${params.ECR_REPO_NAME}:latest ${params.AWS_ACCOUNT_ID}.dkr.ecr.ap-south-1.amazonaws.com/${params.ECR_REPO_NAME}:$BUILD_NUMBER
+                    docker tag ${params.ECR_REPO_NAME}:latest ${params.AWS_ACCOUNT_ID}.dkr.ecr.ap-south-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
+                    """
+                }
+            }
+        }
+
+        stage('Push The Image To ECR') {
+            steps {
+                withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
+                                 string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh """
+                    docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.ap-south-1.amazonaws.com/${params.ECR_REPO_NAME}:$BUILD_NUMBER
+                    docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.ap-south-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
+                    """
+                }
+            }
+        }
+
+        stage('Clean Up the images From Jenkins Server') {
+            steps {
+                sh """
+                docker rmi ${params.AWS_ACCOUNT_ID}.dkr.ecr.ap-south-1.amazonaws.com/${params.ECR_REPO_NAME}:$BUILD_NUMBER || true
+                docker rmi ${params.AWS_ACCOUNT_ID}.dkr.ecr.ap-south-1.amazonaws.com/${params.ECR_REPO_NAME}:latest || true
+                """
+            }
+        }
+    }
+}
+
+#############################################################################################################################################
+
+Release Pipeline Code
+
+pipeline {
+    agent any
+
+    environment {
+        KUBECTL = '/usr/local/bin/kubectl'
+    }
+
+    parameters {
+        string(name: 'CLUSTER_NAME', defaultValue: 'amazon-prime-cluster', description: 'Enter your EKS cluster name')
+    }
+
+    stages {
+        stage("Login to EKS") {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
+                                     string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')]) {
+                        sh "aws eks --region ap-south-1 update-kubeconfig --name ${params.CLUSTER_NAME}"
+                    }
+                }
+            }
+        }
+
+        stage("Configure Prometheus & Grafana") {
+            steps {
+                script {
+                    sh """
+                    helm repo add stable https://charts.helm.sh/stable || true
+                    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+                    # Check if namespace 'prometheus' exists
+                    if kubectl get namespace prometheus > /dev/null 2>&1; then
+                        # If namespace exists, upgrade the Helm release
+                        helm upgrade stable prometheus-community/kube-prometheus-stack -n prometheus
+                    else
+                        # If namespace does not exist, create it and install Helm release
+                        kubectl create namespace prometheus
+                        helm install stable prometheus-community/kube-prometheus-stack -n prometheus
+                    fi
+                    kubectl patch svc stable-kube-prometheus-sta-prometheus -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
+                    kubectl patch svc stable-grafana -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
+                    """
+                }
+            }
+        }
+
+        stage("Configure ArgoCD") {
+            steps {
+                script {
+                    sh """
+                    # Install ArgoCD
+                    kubectl create namespace argocd || true
+                    kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+                    kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+                    """
+                }
+            }
+        }
+		
+    }
+}
+#############################################################################################################################################
+
+Deployment.yml
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: awsprime-app
+  labels:
+    app: awsprime-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: awsprime-app
+  template:
+    metadata:
+      labels:
+        app: awsprime-app
+    spec:
+      containers:
+      - name: awsprime-container
+        image: 438465146284.dkr.ecr.ap-south-1.amazonaws.com/amazon-prime:17
+        ports:
+        - containerPort: 3000
+...
+#############################################################################################################################################
+
+service.yml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: awsprime-app
+  labels:
+    app: awsprime-app
+spec:
+  ports:
+  - name: http
+    port: 3000
+    protocol: TCP
+    targetPort: 3000
+  selector:
+    app: awsprime-app
+  type: LoadBalancer
+...
+#############################################################################################################################################
+access.sh 
+
+#!/bin/bash
+# This script is used to get the argocd, prometheus & grafana urls & credentials
+
+aws configure
+aws eks update-kubeconfig --region "us-east-1" --name "amazon-prime-cluster"
+
+# ArgoCD Access
+argo_url=$(kubectl get svc -n argocd | grep argocd-server | awk '{print$4}' | head -n 1)
+argo_initial_password=$(argocd admin initial-password -n argocd)
+
+# ArgoCD Credentials
+argo_user="admin"
+
+argo_password=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 --decode)
+
+# Prometheus and Grafana URLs and credentials
+prometheus_url=$(kubectl get svc -n prometheus | grep stable-kube-prometheus-sta-prometheus | awk '{print $4}')
+grafana_url=$(kubectl get svc -n prometheus | grep stable-grafana | awk '{print $4}')
+grafana_user="admin"
+grafana_password=$(kubectl get secret stable-grafana -n prometheus -o jsonpath="{.data.admin-password}" | base64 --decode)
+
+# Print or use these variables
+echo "------------------------"
+echo "ArgoCD URL: $argo_url"
+echo "ArgoCD User: $argo_user"
+echo "ArgoCD Initial Password: $argo_initial_password" | head -n 1
+echo
+echo "Prometheus URL: $prometheus_url":9090
+echo
+echo "Grafana URL: $grafana_url"
+echo "Grafana User: $grafana_user"
+echo "Grafana Password: $grafana_password"
+echo "------------------------"
+
+# Run below commands
+# chmod a+x access.sh
+# ./access.sh
+#############################################################################################################################################

@@ -1,0 +1,52 @@
+1. Create the IAM user 
+2. CLone the repo to local 
+3. Make necessary changes in the code like region,AZ,pem key, ami-id etc
+4. Terraform init, plan, apply
+5. After creating the infra jenkins will install automatically 
+6. configure the jenkins and sonarqube integration using webhooks
+	http://65.0.203.82:8080               #jenkisn server
+	1bab0448761a40e9bbf53615b9580037
+	Access SonarQube Server here --> http://65.0.203.82:9000 
+	SonarQube Username & : admin   Password: admin@123
+	Sonar-Token: squ_3c476e4ab54ff9b941897d89bcc2a0dc52e0e964  #this is the token we have to store in a jenkins for validation sonarqube server
+	Configure the credentials in the jenins for the sonarqube, access key and secrete access kye of iam user 
+	Install the plugins like sonarqube,stage view, prometheus metrics, docker, java selenium, nodejs etc
+	Configure sonarqube in the manage jenkins > sonarqube server> and add here the host and the token we added recently in the credentials
+	Then configure the tools like JDK v17, sonar scanner latest, nodejs, docker etc 
+7. after configuring all the jenkins setup build the CI pipeline and the stages like:
+	Git Checkout
+	Sonar Qube Analysis
+	Sonar Quality Gate
+	'NPM install
+	Trivy Scan
+	Build Docker Image
+	Create ECR Repo
+	Login To ECR and Tag Image
+	Push The Image To ECR
+	Clean Up the images From Jenkins Server
+8. Test the CI pipline and status of the stages. Provide proper parameters while running the pipeline
+9. Create the EKS cluster using the terraform. It will take 15-20 mins to create
+10. After running CI pipeline succesfully build and run the CD pipeline. It will have stages like:
+	Login to EKS
+	Configure Prometheus & Grafana
+	Configure ArgoCD
+11. After runnig the CD pipeline run the access.sh script which will give all the endpoints like argocd, prometheus, grafana, etc
+	output of the script
+	Updated context arn:aws:eks:ap-south-1:438465146284:cluster/amazon-prime-cluster in /home/ubuntu/.kube/config
+	------------------------
+	ArgoCD URL: ad5e0707777c144a4b83565170967d74-2129032813.ap-south-1.elb.amazonaws.com
+	ArgoCD User: admin
+	ArgoCD Initial Password: GCMdOjZVVFTyBWwT
+	Prometheus URL: ab11cc9d1e7684849b3f0d34c9b2c26a-747095752.ap-south-1.elb.amazonaws.com:9090
+	Grafana URL: a4e8a95b42872453a88a5cb51098d447-620022303.ap-south-1.elb.amazonaws.com
+	Grafana User: admin
+	Grafana Password: prom-operator
+12. Run the argocd endpoints on browser and configure the application. Configure application name, github url, k8 file path, etc
+13. After creating application argocd will automatically fetch all the deployments files and run on EKS cluster. And our application will go live
+14. Create the dashboards on grafana to monitor our applicaion and metrics
+15. We can set our endpoints to shorten url by applying Route53
+	EX: Endpoint: ad5e0707777c144a4b83565170967d74-2129032813.ap-south-1.elb.amazonaws.com
+		Shorten Url after applying subdomain: argocd.prashikwahane.com 
+		
+16. Finally our application is live with overall CICD with security, safty, HA, Fully Automate
+
